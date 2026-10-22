@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.env
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Recorded data, datasets and training outputs
+data/
+recordings/
+pirobot_data/
+pirobot_runs/
+outputs/
+checkpoints/
+wandb/
+*.partial/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
