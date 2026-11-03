@@ -20,27 +20,30 @@ from multiprocessing.connection import Client
 
 import rclpy
 from geometry_msgs.msg import Twist
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool, String
 
-from pirobot_actions import snap
+from pirobot_actions import snap, to_cmd_str
 
 
 class SmolVLABridge(Node):
     def __init__(self):
         super().__init__("smolvla_bridge")
         p = self.declare_parameter
+        dyn = ParameterDescriptor(dynamic_typing=True)
         p("image_topic", "/camera/image/compressed")
         p("cmd_topic", "/cmd_vel")
-        p("rate", 10.0)                 # Hz; use the dataset fps
+        p("pirobot_cmd_topic", "/pirobot/command")  # std_msgs/String for motion_subscriber.py
+        p("rate", 10.0, dyn)            # Hz; use the dataset fps
         p("task", "move around while avoiding obstacles")
         p("server_port", 6010)
         p("server_authkey", "pirobot")
-        p("image_timeout", 0.5)
+        p("image_timeout", 0.5, dyn)
         p("discrete", True)             # snap to forward/back/left/right/stop
-        p("stop_radius", 0.25)
+        p("stop_radius", 0.25, dyn)
         g = lambda n: self.get_parameter(n).value
 
         self.task = g("task")
@@ -60,6 +63,8 @@ class SmolVLABridge(Node):
         self.create_subscription(String, "/smolvla/task", self.on_task, 10)
         self.create_subscription(Bool, "/smolvla/enable", self.on_enable, 10)
         self.cmd_pub = self.create_publisher(Twist, g("cmd_topic"), 10)
+        pirobot_topic = g("pirobot_cmd_topic")
+        self.pirobot_cmd_pub = self.create_publisher(String, pirobot_topic, 10) if pirobot_topic else None
         self.dbg_pub = self.create_publisher(String, "/smolvla/debug", 10)
         self.create_timer(1.0 / float(g("rate")), self.tick)
         self.get_logger().info(f"Ready (disabled). Task: '{self.task}'")
@@ -98,10 +103,13 @@ class SmolVLABridge(Node):
             self.conn = None
             return None
 
-    def publish(self, v, w):
+    def publish(self, v, w, name="stop"):
         t = Twist()
         t.linear.x, t.angular.z = float(v), float(w)
         self.cmd_pub.publish(t)
+        if self.pirobot_cmd_pub is not None:
+            cmd_name = name if name != "raw" else snap(v, w, self.stop_radius)[0]
+            self.pirobot_cmd_pub.publish(String(data=to_cmd_str(cmd_name)))
         self.prev = (float(v), float(w))
 
     def tick(self):
@@ -109,21 +117,21 @@ class SmolVLABridge(Node):
             return
         if self.last_img is None or time.monotonic() - self.last_img[0] > self.image_timeout:
             self.get_logger().warn("No fresh camera frame: stopping", throttle_duration_sec=2.0)
-            self.publish(0.0, 0.0)
+            self.publish(0.0, 0.0, "stop")
             return
         if not self.connect():
-            self.publish(0.0, 0.0)
+            self.publish(0.0, 0.0, "stop")
             return
         res = self.request({"op": "act", "jpeg": self.last_img[1], "task": self.task, "prev": list(self.prev)})
         if not res or "action" not in res:
-            self.publish(0.0, 0.0)
+            self.publish(0.0, 0.0, "stop")
             return
         v, w = res["action"]
         name = "raw"
         if self.discrete:
             name, v, w = snap(v, w, self.stop_radius)
-        self.publish(v, w)
-        self.dbg_pub.publish(String(data=f"{name} v={v:+.2f} w={w:+.2f} raw={res['action']} {res['ms']:.0f}ms"))
+        self.publish(v, w, name)
+        self.dbg_pub.publish(String(data=f"{name} ({to_cmd_str(name)}) v={v:+.2f} w={w:+.2f} raw={res['action']} {res['ms']:.0f}ms"))
 
 
 def main():

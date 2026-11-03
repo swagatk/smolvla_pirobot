@@ -31,30 +31,33 @@ from datetime import datetime
 
 import rclpy
 from geometry_msgs.msg import Twist, TwistStamped
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
-from pirobot_actions import label
+from pirobot_actions import from_cmd_str, label
 
 
 class EpisodeRecorder(Node):
     def __init__(self):
         super().__init__("episode_recorder")
         p = self.declare_parameter
+        dyn = ParameterDescriptor(dynamic_typing=True)
         p("image_topic", "/camera/image/compressed")
         p("cmd_topic", "/cmd_vel")
+        p("pirobot_cmd_topic", "/pirobot/command")  # std_msgs/String for motion_subscriber.py
         p("cmd_stamped", False)       # True if your teleop publishes TwistStamped
-        p("fps", 10.0)
+        p("fps", 10.0, dyn)
         p("out_dir", os.path.expanduser("~/pirobot_data/raw"))
         p("task", "move around while avoiding obstacles")
         # 0 = hold the last command until a new one arrives (latching teleop).
         # >0 = treat the command as "stop" if nothing arrived for this long,
         #      which matches drivers that stop when cmd_vel goes quiet.
-        p("cmd_timeout", 0.0)
-        p("image_timeout", 0.3)       # skip a tick if the newest frame is older
+        p("cmd_timeout", 0.0, dyn)
+        p("image_timeout", 0.3, dyn)  # skip a tick if the newest frame is older
         p("min_frames", 20)           # refuse to save shorter episodes
 
         g = lambda n: self.get_parameter(n).value
@@ -76,6 +79,8 @@ class EpisodeRecorder(Node):
             self.create_subscription(TwistStamped, g("cmd_topic"), lambda m: self.on_cmd(m.twist), 10)
         else:
             self.create_subscription(Twist, g("cmd_topic"), self.on_cmd, 10)
+        if g("pirobot_cmd_topic"):
+            self.create_subscription(String, g("pirobot_cmd_topic"), self.on_pirobot_cmd, 10)
         self.create_subscription(String, "~/task", self.on_task, 10)
         self.create_service(Trigger, "~/start", self.srv_start)
         self.create_service(Trigger, "~/stop", self.srv_stop)
@@ -99,6 +104,10 @@ class EpisodeRecorder(Node):
 
     def on_cmd(self, tw: Twist):
         self.last_cmd = (float(tw.linear.x), float(tw.angular.z))
+        self.last_cmd_time = time.monotonic()
+
+    def on_pirobot_cmd(self, msg: String):
+        self.last_cmd = from_cmd_str(msg.data)
         self.last_cmd_time = time.monotonic()
 
     def on_task(self, msg: String):

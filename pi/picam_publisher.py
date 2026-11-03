@@ -17,6 +17,7 @@ import cv2
 import rclpy
 from libcamera import Transform
 from picamera2 import Picamera2
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
@@ -25,9 +26,10 @@ from sensor_msgs.msg import CompressedImage
 class PiCamPublisher(Node):
     def __init__(self):
         super().__init__("picam_publisher")
+        dyn = ParameterDescriptor(dynamic_typing=True)
         self.declare_parameter("width", 320)
         self.declare_parameter("height", 240)
-        self.declare_parameter("fps", 15.0)
+        self.declare_parameter("fps", 15.0, dyn)
         self.declare_parameter("jpeg_quality", 80)
         self.declare_parameter("hflip", False)
         self.declare_parameter("vflip", False)

@@ -1,22 +1,46 @@
 """Discrete motion commands shared by the recorder and the inference bridge.
 
-The dataset stores the continuous Twist the teleop sent, (linear.x, angular.z),
-as the 2-D action. These helpers label it with one of the five discrete
-commands and, at inference time, snap the policy's continuous output back to
-the nearest discrete command.
-
-Edit COMMANDS so the speeds match what your keyboard teleop actually sends.
+Matches `pi/pirobot/pirobot/motor_control.py` and `motion_subscriber.py`:
+- `motor_control.py` drives both motors with PWM `Frequency = 20` Hz and
+  `DutyCycleA = 50`, `DutyCycleB = 50` (0.50 normalised duty cycle) for all
+  four active movements (`UP`, `DOWN`, `LEFT`, `RIGHT`), and `Stop = 0` (0.0).
+- `motion_subscriber.py` listens on `/pirobot/command` (`std_msgs/msg/String`)
+  for `'UP'`, `'DOWN'`, `'LEFT'`, `'RIGHT'`, `'STOP'`.
 """
 import math
 
-# name -> (linear_x m/s, angular_z rad/s)
+# Normalised PWM duty cycle from motor_control.py (DutyCycleA = DutyCycleB = 50%)
+DUTY_CYCLE = 0.50
+
+# name -> (linear_x, angular_z) scaled to the 50% duty cycle in motor_control.py
 COMMANDS = {
     "stop": (0.0, 0.0),
-    "forward": (0.20, 0.0),
-    "back": (-0.15, 0.0),
-    "left": (0.0, 1.0),
-    "right": (0.0, -1.0),
+    "forward": (DUTY_CYCLE, 0.0),
+    "back": (-DUTY_CYCLE, 0.0),
+    "left": (0.0, DUTY_CYCLE),
+    "right": (0.0, -DUTY_CYCLE),
 }
+
+# Mapping between /pirobot/command (motion_subscriber.py / motor_control.py) and COMMANDS
+PIROBOT_CMD_TO_NAME = {
+    "STOP": "stop",
+    "UP": "forward",
+    "DOWN": "back",
+    "LEFT": "left",
+    "RIGHT": "right",
+}
+NAME_TO_PIROBOT_CMD = {v: k for k, v in PIROBOT_CMD_TO_NAME.items()}
+
+
+def from_cmd_str(cmd_str: str) -> tuple[float, float]:
+    """Convert a /pirobot/command String ('UP', 'DOWN', 'LEFT', 'RIGHT', 'STOP') to (v, w)."""
+    name = PIROBOT_CMD_TO_NAME.get(cmd_str.strip().upper(), "stop")
+    return COMMANDS[name]
+
+
+def to_cmd_str(name: str) -> str:
+    """Convert a discrete command name ('forward', 'back', 'left', 'right', 'stop') to /pirobot/command String."""
+    return NAME_TO_PIROBOT_CMD.get(name, "STOP")
 
 
 def label(v: float, w: float, eps: float = 1e-3) -> str:
