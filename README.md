@@ -17,11 +17,11 @@ episodes and the resulting dataset loads in LeRobot. Not run: the ROS nodes
 ```
  Raspberry Pi 4 (ROS2 Jazzy)                 GPU laptop (ROS2 Jazzy, Ubuntu 24.04)
  ┌──────────────────────────┐   LAN/DDS     ┌───────────────────────────────────────────┐
- │ picam_publisher.py       │──────────────▶│ COLLECT: episode_recorder.py  (system py)  │
+ │ pirobot/picam_publisher  │──────────────▶│ COLLECT: episode_recorder.py  (system py)  │
  │  /camera/image/compressed│               │          episode_ctl.py (keys r/s/d/1-3)   │
  │                          │               │          → raw episodes on disk            │
- │ your motor driver        │◀──────────────│ your keyboard teleop → /cmd_vel            │
- │  subscribes /cmd_vel     │               │                                            │
+ │ pirobot/motion_subscriber│◀──────────────│ pirobot/keyboard_publisher (arrow keys)    │
+ │  /pirobot/command String │               │  → /pirobot/command  UP/DOWN/LEFT/RIGHT/STOP│
  └──────────────────────────┘               │ CONVERT: convert_to_lerobot.py  (venv)     │
                                             │ TRAIN:   train_smolvla.sh       (venv)     │
                                             │ RUN:     smolvla_bridge.py (system py) ◀─┐ │
@@ -44,7 +44,7 @@ talk over a localhost socket using only the standard library.
 |---|---|---|
 | Camera | 320×240 JPEG, 15 fps, best-effort QoS | ~15 KB/frame, easy on WiFi; SmolVLA resizes to 512×512 anyway |
 | Sample rate | 10 Hz timer on the laptop | Enough for a slow ground robot; recorder pairs each tick with the newest frame |
-| Action | `[linear_x, angular_z]` from `/cmd_vel` (float32, 2) | SmolVLA predicts continuous actions; the bridge snaps them back to forward/back/left/right/stop |
+| Action | `[linear_x, angular_z]` (float32, 2), mapped from `/pirobot/command` by `pirobot_actions.py` (UP → (0.5, 0), LEFT → (0, 0.5), ...) | SmolVLA predicts continuous actions; the bridge snaps them back to forward/back/left/right/stop |
 | State | zeros (default) or previous command | See "copycat" note in `convert_to_lerobot.py` |
 | Camera key | `observation.images.camera1` | Matches `smolvla_base`'s first camera, so no `--rename_map`; the other two cameras are simply absent |
 | Task | one string per episode | Recorded with the episode, editable later with `--task-map` |
@@ -52,23 +52,39 @@ talk over a localhost socket using only the standard library.
 
 ## 3. Setup
 
-**Network (both machines).** Same subnet, same `ROS_DOMAIN_ID`, e.g. in `~/.bashrc`:
+**Network (both machines).** Same subnet, same `ROS_DOMAIN_ID` (the Pi uses 19), e.g. in `~/.bashrc`:
 ```bash
-export ROS_DOMAIN_ID=42
+export ROS_DOMAIN_ID=19
 export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
 ```
 Check with `ros2 topic hz /camera/image/compressed` on the laptop. If discovery
 fails on your router (multicast blocked), use a Fast DDS discovery server.
 
-**Pi.** Copy `pi/picam_publisher.py`. Needs `python3-picamera2` and `python3-opencv` (apt).
+**`pirobot` ROS package (both machines).** `pi/pirobot` holds the camera
+publisher, the keyboard teleop and the motor node. Build it on the Pi *and* on
+the laptop (the laptop only runs `keyboard_publisher` from it):
 ```bash
-python3 picam_publisher.py --ros-args -p width:=320 -p height:=240 -p fps:=15
+cp -r pi/pirobot ~/ros2_ws/src/       # or symlink it
+cd ~/ros2_ws && colcon build --packages-select pirobot && source install/setup.bash
 ```
-Add `-p hflip:=true -p vflip:=true` if the camera is mounted upside down.
+Pi needs `python3-picamera2`, `python3-opencv`, `python3-rpi.gpio` (apt);
+the laptop needs `python3-pygame`.
 
-**Pi safety watchdog (strongly recommended).** Make sure your motor driver stops
-the motors if no `/cmd_vel` arrives for ~0.5 s. If WiFi drops during autonomous
-driving, this is the only thing that stops the robot.
+**Pi: camera + motors** (one command):
+```bash
+ros2 launch pirobot robot.launch.py            # 320x240 @ 15 fps, watchdog 0.5 s
+ros2 launch pirobot robot.launch.py hflip:=true vflip:=true   # camera upside down
+```
+or the nodes separately: `ros2 run pirobot picam_publisher` and
+`ros2 run pirobot motion_subscriber`. The camera uses the full sensor field of
+view (`full_fov:=false` reverts to libcamera's default 640x480 centre crop).
+The camera takes ~10 s to start.
+
+**Safety watchdog.** `motion_subscriber` stops the motors if no command
+arrives for 0.5 s (`-p timeout:=...`), so a WiFi drop or a crashed teleop or
+bridge stops the robot. `keyboard_publisher` and `smolvla_bridge` publish
+continuously, so it never triggers in normal driving. Ctrl-C on the motor node
+always stops the motors and releases the GPIO pins.
 
 **Laptop, ROS side:** nothing extra beyond ROS2 Jazzy (`std_srvs`, `sensor_msgs`, `geometry_msgs`).
 
@@ -85,17 +101,20 @@ Do not `source /opt/ros/jazzy/setup.bash` in this terminal.
 
 Edit `laptop/pirobot_actions.py` → `COMMANDS` so the speeds match your teleop.
 
-Three terminals on the laptop (ROS sourced), plus the Pi camera node:
+On the Pi: `ros2 launch pirobot robot.launch.py`. Then three terminals on the
+laptop (ROS and `~/ros2_ws/install/setup.bash` sourced):
 ```bash
-# T1: recorder.  cmd_timeout:=0 assumes your teleop latches (one key press keeps
-# the robot moving). If your robot stops when keys are released, set it to 0.3.
-python3 episode_recorder.py --ros-args -p out_dir:=$HOME/pirobot_data/raw -p cmd_timeout:=0.0
+# T1: recorder. cmd_timeout matches the robot's watchdog: if commands stop
+# arriving, the recorded action becomes "stop", just like the robot.
+python3 episode_recorder.py --ros-args -p out_dir:=$HOME/pirobot_data/raw -p cmd_timeout:=0.5
 # T2: episode control: 1/2/3 pick the task, r start, s save, d discard
 python3 episode_ctl.py
-# T3: your existing keyboard teleop
+# T3: teleop. A small pygame window opens; click it, then hold the arrow keys.
+#     Nothing held = STOP. ESC (or closing the window) sends STOP and quits.
+ros2 run pirobot keyboard_publisher
 ```
-Set `-p cmd_stamped:=true` if your teleop publishes `TwistStamped`, and
-`-p cmd_topic:=...` if it is not `/cmd_vel`.
+Keys only reach the window that has focus: press `r` in T2, click the teleop
+window and drive, then go back to T2 for `s` or `d`.
 
 Leading/trailing idle frames while you switch terminals are trimmed automatically
 at conversion time.
@@ -142,7 +161,7 @@ on a cloud GPU unchanged.
 ```bash
 # T1 (lerobot venv): policy server on the GPU
 python smolvla_server.py --policy ~/pirobot_runs/smolvla_pirobot/checkpoints/last/pretrained_model --n-action-steps 5
-# T2 (ROS sourced): bridge. Close the teleop first; both publish /cmd_vel.
+# T2 (ROS sourced): bridge. Close keyboard_publisher first; both publish /pirobot/command.
 python3 smolvla_bridge.py
 # T3: choose the task, then enable / disable
 ros2 topic pub --once /smolvla/task   std_msgs/msg/String "{data: 'follow the ball'}"
@@ -172,11 +191,15 @@ snapping. Changing the task mid-run resets the action queue.
 
 | File | Runs on | Purpose |
 |---|---|---|
-| `pi/picam_publisher.py` | Pi | PiCamera2 → `CompressedImage` JPEG |
+| `pi/pirobot/launch/robot.launch.py` | Pi | Starts camera + motion nodes |
+| `pi/pirobot/pirobot/picam_publisher.py` | Pi | PiCamera2 → `CompressedImage` JPEG |
+| `pi/pirobot/pirobot/motion_subscriber.py` | Pi | `/pirobot/command` → motors, with watchdog |
+| `pi/pirobot/pirobot/motor_control.py` | Pi | GPIO PWM motor driver |
+| `pi/pirobot/pirobot/keyboard_publisher.py` | laptop | Arrow keys → `/pirobot/command` |
 | `laptop/pirobot_actions.py` | laptop | Discrete command table, labelling and snapping |
-| `laptop/episode_recorder.py` | laptop, ROS | Synchronised frame + cmd_vel + task recorder |
+| `laptop/episode_recorder.py` | laptop, ROS | Synchronised frame + command + task recorder |
 | `laptop/episode_ctl.py` | laptop, ROS | One-key start/save/discard/task control |
 | `laptop/convert_to_lerobot.py` | laptop, venv | Raw episodes → LeRobot v3 dataset |
 | `laptop/train_smolvla.sh` | laptop, venv | `lerobot-train` fine-tuning of `smolvla_base` |
 | `laptop/smolvla_server.py` | laptop, venv | Loads the checkpoint, serves actions on localhost |
-| `laptop/smolvla_bridge.py` | laptop, ROS | Camera → server → snapped `/cmd_vel`, with enable/stop |
+| `laptop/smolvla_bridge.py` | laptop, ROS | Camera → server → snapped `/pirobot/command`, with enable/stop |

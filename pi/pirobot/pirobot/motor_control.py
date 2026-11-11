@@ -3,10 +3,6 @@
 
 # load the libraries
 import RPi.GPIO as GPIO
-import time
-import numpy as np
-import sys
-from pirobot import key_press as kp
 
 
 # set variables for GPIO  Pins
@@ -22,9 +18,14 @@ DutyCycleA = 50
 DutyCycleB = 50
 Stop = 0
 
+# Commands that move the robot; anything else stops it.
+ACTIVE_COMMANDS = ('UP', 'DOWN', 'LEFT', 'RIGHT')
+
+_initialized = False
 
 
 def initialize_motors():
+    global _initialized
     #set GPIO modes
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
@@ -51,6 +52,21 @@ def initialize_motors():
     pwmMotorABackward.start(Stop)
     pwmMotorBForward.start(Stop)
     pwmMotorBBackward.start(Stop)
+    _initialized = True
+
+
+def cleanup():
+    """Stop the motors and release the GPIO pins (safe to call twice)."""
+    global _initialized
+    if not _initialized:
+        return
+    stopmotors()
+    for pwm in (pwmMotorAForward, pwmMotorABackward,
+                pwmMotorBForward, pwmMotorBBackward):
+        pwm.stop()
+    GPIO.cleanup((pinMotorAForward, pinMotorABackward,
+                  pinMotorBForward, pinMotorBBackward))
+    _initialized = False
 
 def stopmotors():
     pwmMotorAForward.ChangeDutyCycle(Stop)
@@ -59,21 +75,18 @@ def stopmotors():
     pwmMotorBBackward.ChangeDutyCycle(Stop)
 
 def forward():
-    print('Moving Forward')
     pwmMotorAForward.ChangeDutyCycle(DutyCycleA)
     pwmMotorABackward.ChangeDutyCycle(Stop)
     pwmMotorBForward.ChangeDutyCycle(DutyCycleB)
     pwmMotorBBackward.ChangeDutyCycle(Stop)
 
 def backward():
-    print('Moving backward')
     pwmMotorAForward.ChangeDutyCycle(Stop)
     pwmMotorABackward.ChangeDutyCycle(DutyCycleA)
     pwmMotorBForward.ChangeDutyCycle(Stop)
     pwmMotorBBackward.ChangeDutyCycle(DutyCycleB)
 
 def turnleft():
-    print('Turning Left')
     pwmMotorAForward.ChangeDutyCycle(Stop)
     pwmMotorABackward.ChangeDutyCycle(DutyCycleA)
     pwmMotorBForward.ChangeDutyCycle(DutyCycleB)
@@ -81,68 +94,60 @@ def turnleft():
 
 
 def turnright():
-    print('Turning Right')
     pwmMotorAForward.ChangeDutyCycle(DutyCycleA)
     pwmMotorABackward.ChangeDutyCycle(Stop)
     pwmMotorBForward.ChangeDutyCycle(Stop)
     pwmMotorBBackward.ChangeDutyCycle(DutyCycleB)
 
 
-def key_control():
+def key_control(kp):
 
     if kp.getKey('LEFT'):
         turnleft()
 
     elif kp.getKey('RIGHT'):
         turnright()
-        
+
     elif kp.getKey('UP'):
         forward()
-        
+
     elif kp.getKey('DOWN'):
         backward()
 
     elif kp.getKey('ESCAPE'):
-        stopmotors()
-        kp.stop()
-        GPIO.cleanup()
+        return False
 
     else:
         stopmotors()
-        
+    return True
+
 
 def exec_cmd(cmd_str):
+    """Apply a /pirobot/command string. Unknown commands, 'STOP' and 'EXIT' stop."""
     if cmd_str == 'LEFT':
-        print('Turning Left')
         turnleft()
     elif cmd_str == 'RIGHT':
-        print('Turning Right')
         turnright()
     elif cmd_str == 'UP':
-        print('Moving Forward')
         forward()
     elif cmd_str == 'DOWN':
-        print('Moving Downward')
         backward()
-    elif cmd_str == 'EXIT':
-        print('Exiting')
-        sys.exit()
     else:
         stopmotors()
-        
-    
+
 
 if __name__ == '__main__':
+    # Local test without ROS: drive with the arrow keys in the pygame window.
+    import time
+    from pirobot import key_press as kp
     initialize_motors()
-    stopmotors()
     kp.init()
-    print('Controlling using keyboard')
-    while True:
-        try:
-            key_control()
-        except KeyboardInterrupt:
-            GPIO.cleanup()
-            kp.stop()
-    
-
-
+    print('Controlling using keyboard, ESC to quit')
+    try:
+        while key_control(kp):
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cleanup()
+        kp.stop()
