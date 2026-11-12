@@ -201,7 +201,9 @@ lerobot-dataset-viz --repo-id <hf_user>/pirobot_nav --root ~/pirobot_data/lerobo
 BATCH=16 STEPS=20000 bash train_smolvla.sh <hf_user>/pirobot_nav ~/pirobot_data/lerobot
 ```
 Training starts from `lerobot/smolvla_base` with the vision encoder frozen and
-only the action expert trained (SmolVLA's defaults), mixed precision on,
+only the action expert trained (SmolVLA's defaults), in bfloat16 (SmolVLA's
+own weight dtype; `use_amp` is off because lerobot's fp16 AMP scaler crashes on
+bfloat16 gradients),
 colour/affine augmentation on (no horizontal flip, which would invert steering),
 and 10% of episodes held out for eval loss. On an 8 GB laptop GPU use `BATCH=8`.
 If you have more data than the laptop can chew through, the same script runs

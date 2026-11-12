@@ -4,6 +4,8 @@
 #
 #   bash train_smolvla.sh <hf_user>/pirobot_nav ~/pirobot_data/lerobot
 #
+# use_amp stays false: SmolVLA loads its weights in bfloat16, and lerobot's AMP
+# path (fp16 GradScaler) fails on bfloat16 gradients. Training still runs in bf16.
 # BATCH: 64 is the upstream default for an A100. On a laptop GPU start at 8
 # (8 GB VRAM) or 16 (12-16 GB) and raise it until memory runs out.
 # STEPS: 20k is upstream's default (~4 h on an A100). With a few hours of
@@ -22,7 +24,7 @@ ROOT_ARG=()
 lerobot-train \
   --policy.path=lerobot/smolvla_base \
   --policy.device=cuda \
-  --policy.use_amp=true \
+  --policy.use_amp=false \
   --policy.push_to_hub=false \
   --dataset.repo_id="$REPO_ID" \
   "${ROOT_ARG[@]}" \
