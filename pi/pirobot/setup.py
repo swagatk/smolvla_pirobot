@@ -24,6 +24,7 @@ setup(
             'keyboard_publisher = pirobot.keyboard_publisher:main',
             'motion_subscriber = pirobot.motion_subscriber:main',
             'picam_publisher = pirobot.picam_publisher:main',
+            'calibrate_motors = pirobot.calibrate_motors:main',
             # short aliases kept from earlier versions
             'keypub = pirobot.keyboard_publisher:main',
             'motionsub = pirobot.motion_subscriber:main',

@@ -40,6 +40,9 @@ class MotionSubscriber(Node):
         self.get_logger().info(
             f'Listening on {self.get_parameter("topic").value}, '
             f'watchdog {self.timeout:.2f} s')
+        self.get_logger().info(
+            f'Duty A={mc.DutyCycleA:g} B={mc.DutyCycleB:g} @ {mc.Frequency:g} Hz '
+            f'(calibration: {mc.CALIB_FILE})')
 
     def apply(self, cmd):
         cmd = cmd if cmd in mc.ACTIVE_COMMANDS else 'STOP'

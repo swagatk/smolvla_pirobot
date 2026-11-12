@@ -2,6 +2,9 @@
 
 
 # load the libraries
+import json
+import os
+
 import RPi.GPIO as GPIO
 
 
@@ -12,11 +15,17 @@ pinMotorBForward = 8
 pinMotorBBackward = 7
 
 
-# PWM parameters
+# PWM parameters. DutyCycleA/B (and Frequency) are overridden by the
+# calibration file written by `ros2 run pirobot calibrate_motors`.
+# Motor A is the left wheel, motor B the right (see turnleft()).
 Frequency = 20
 DutyCycleA = 50
 DutyCycleB = 50
 Stop = 0
+
+CALIB_FILE = os.environ.get(
+    'PIROBOT_MOTOR_CALIB',
+    os.path.expanduser('~/.config/pirobot/motor_calib.json'))
 
 # Commands that move the robot; anything else stops it.
 ACTIVE_COMMANDS = ('UP', 'DOWN', 'LEFT', 'RIGHT')
@@ -24,8 +33,43 @@ ACTIVE_COMMANDS = ('UP', 'DOWN', 'LEFT', 'RIGHT')
 _initialized = False
 
 
-def initialize_motors():
+def load_calibration(path=CALIB_FILE):
+    """Load duty_a, duty_b, frequency from the calibration file, if present.
+    Returns the path loaded, or None (defaults kept)."""
+    global DutyCycleA, DutyCycleB, Frequency
+    try:
+        with open(path) as f:
+            c = json.load(f)
+    except FileNotFoundError:
+        return None
+    DutyCycleA = float(c.get('duty_a', DutyCycleA))
+    DutyCycleB = float(c.get('duty_b', DutyCycleB))
+    Frequency = float(c.get('frequency', Frequency))
+    return path
+
+
+def save_calibration(path=CALIB_FILE):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        json.dump({'duty_a': DutyCycleA, 'duty_b': DutyCycleB,
+                   'frequency': Frequency}, f, indent=2)
+    return path
+
+
+def set_duty(a, b):
+    """Set the duty cycles used by forward()/backward()/turns (0..100).
+    Takes effect on the next motion call."""
+    global DutyCycleA, DutyCycleB
+    DutyCycleA = max(0.0, min(100.0, float(a)))
+    DutyCycleB = max(0.0, min(100.0, float(b)))
+
+
+def initialize_motors(calibrate=True):
+    """Set up GPIO/PWM. With calibrate=True, load the calibration file first
+    (it may change Frequency, which is fixed once PWM starts)."""
     global _initialized
+    if calibrate:
+        load_calibration()
     #set GPIO modes
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
