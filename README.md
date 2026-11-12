@@ -97,7 +97,58 @@ hf auth login                                      # only needed to push to the 
 ```
 Do not `source /opt/ros/jazzy/setup.bash` in this terminal.
 
-## 4. Collecting data
+## 4. Calibrate Motors
+
+With the same duty cycle on both motors, the two motors run at slightly
+different speeds, so `UP` drives in a curve. `calibrate_motors` lets you trim
+each motor's duty cycle until the robot goes straight. Do it once before
+collecting data: the policy learns whatever the motors actually do, so keep the
+calibration the same for recording and deployment.
+
+On the Pi, in a plain terminal (SSH is fine). Stop `robot.launch.py` /
+`motion_subscriber` first; they use the same GPIO pins.
+```bash
+source ~/ros2_ws/install/setup.bash
+ros2 run pirobot calibrate_motors --frequency 100
+```
+Put the robot on a straight reference (tape line, floor tiles, a wall edge),
+press `f`, and watch which way it drifts.
+
+| Key | Action |
+|---|---|
+| `f` / `b` | Drive forward / backward for the test duration (default 3 s). Any key stops at once. |
+| `a` / `z` | Motor A (left) +1 / −1 (`A` / `Z`: ±5) |
+| `k` / `m` | Motor B (right) +1 / −1 (`K` / `M`: ±5) |
+| `]` / `[` | Both motors +1 / −1: changes speed, keeps the balance |
+| `+` / `-` | Test duration ±0.5 s |
+| `w` | Save |
+| `q` | Quit |
+
+- Drifts **right**: the left motor (A) is faster. Press `z` or `k`.
+- Drifts **left**: the right motor (B) is faster. Press `m` or `a`.
+- If those are reversed on your robot, the motors are wired the other way
+  round; use the opposite keys.
+
+`w` writes `~/.config/pirobot/motor_calib.json` (or the path in
+`$PIROBOT_MOTOR_CALIB`) with `duty_a`, `duty_b` and `frequency`.
+`motion_subscriber` loads it at startup and logs the values, e.g.
+`Duty A=48 B=56 @ 100 Hz`. Without the file it uses 50/50 at 20 Hz.
+
+Tips:
+- **Use a higher PWM frequency.** At 20 Hz the software PWM pulses are slow
+  enough to make motion jerky and inconsistent, which makes the trim unstable.
+  Try `--frequency 100` (saved with the duty cycles). Recalibrate whenever you
+  change the frequency.
+- **Calibrate on the floor you will record on, with a charged battery.** The
+  imbalance depends on surface and battery voltage; re-check if drift returns.
+- **Use runs of at least 3–4 s.** Small drift only shows over a distance.
+- **Check backward with `b`.** One pair of values is used for both directions;
+  backward may drift differently.
+- **It is open-loop.** Without wheel encoders some drift remains. For SmolVLA
+  that is acceptable: what matters is that the motors behave the same during
+  recording and deployment.
+
+## 5. Collecting data
 
 Edit `laptop/pirobot_actions.py` → `COMMANDS` so the speeds match your teleop.
 
@@ -139,7 +190,7 @@ Also:
 Roughly 1.5–3 h of driving in total for a first model. Check `dropped ticks`
 in the recorder log; above ~10% means the WiFi or camera rate needs fixing.
 
-## 5. Convert and train (lerobot venv)
+## 6. Convert and train (lerobot venv)
 
 ```bash
 cd laptop
@@ -156,7 +207,51 @@ and 10% of episodes held out for eval loss. On an 8 GB laptop GPU use `BATCH=8`.
 If you have more data than the laptop can chew through, the same script runs
 on a cloud GPU unchanged.
 
-## 6. Run on the robot
+### Pushing the dataset to Hugging Face (optional)
+
+Training reads the local copy (`--root`), so pushing is not required. It is
+useful as a backup, or to train on another machine / cloud GPU.
+
+**The dataset is public by default**, and anyone can watch the camera
+footage. Push it as private unless you want it public.
+
+1. Log in once with a token that has **write** access (huggingface.co →
+   Settings → Access Tokens):
+   ```bash
+   hf auth login
+   hf auth whoami        # the repo id must start with this user (or an org you can write to)
+   ```
+2. Push an already converted dataset:
+   ```bash
+   python - <<'EOF'
+   from pathlib import Path
+   from lerobot.datasets.lerobot_dataset import LeRobotDataset
+   ds = LeRobotDataset("<hf_user>/pirobot_nav", root=Path("~/pirobot_data/lerobot").expanduser())
+   print(ds.num_episodes, "episodes,", ds.num_frames, "frames")
+   ds.push_to_hub(private=True)       # drop private=True to make it public
+   EOF
+   ```
+   The repo id must be the same `--repo-id` used for conversion. If it is
+   wrong, re-run `convert_to_lerobot.py` with the correct one. This uploads
+   the data, videos and metadata, and tags the dataset version.
+
+   Alternatively, add `--push` to `convert_to_lerobot.py` to push straight
+   after conversion. That flag always pushes **public**; use the snippet above
+   for a private dataset.
+3. Check it at `https://huggingface.co/datasets/<hf_user>/pirobot_nav`, or
+   from any machine:
+   ```bash
+   lerobot-dataset-viz --repo-id <hf_user>/pirobot_nav --episode-index 0
+   ```
+
+To train from the Hub copy (e.g. on a cloud GPU), omit the dataset root and the
+dataset is downloaded automatically. For a private dataset, run `hf auth login`
+on that machine first:
+```bash
+BATCH=16 STEPS=20000 bash train_smolvla.sh <hf_user>/pirobot_nav
+```
+
+## 7. Run on the robot
 
 ```bash
 # T1 (lerobot venv): policy server on the GPU
@@ -177,7 +272,7 @@ ball following reactive. Lower it for more reactivity if the GPU keeps up
 `-p discrete:=false` on the bridge sends the raw continuous command instead of
 snapping. Changing the task mid-run resets the action queue.
 
-## 7. Improving the model (second round)
+## 8. Improving the model (second round)
 
 1. Run the policy, and when it makes a mistake, disable it, take over with the
    teleop **while recording**, and save that correction as a new episode
@@ -194,7 +289,8 @@ snapping. Changing the task mid-run resets the action queue.
 | `pi/pirobot/launch/robot.launch.py` | Pi | Starts camera + motion nodes |
 | `pi/pirobot/pirobot/picam_publisher.py` | Pi | PiCamera2 → `CompressedImage` JPEG |
 | `pi/pirobot/pirobot/motion_subscriber.py` | Pi | `/pirobot/command` → motors, with watchdog |
-| `pi/pirobot/pirobot/motor_control.py` | Pi | GPIO PWM motor driver |
+| `pi/pirobot/pirobot/motor_control.py` | Pi | GPIO PWM motor driver; loads the motor calibration |
+| `pi/pirobot/pirobot/calibrate_motors.py` | Pi | Interactive duty-cycle trim so `UP` drives straight |
 | `pi/pirobot/pirobot/keyboard_publisher.py` | laptop | Arrow keys → `/pirobot/command` |
 | `laptop/pirobot_actions.py` | laptop | Discrete command table, labelling and snapping |
 | `laptop/episode_recorder.py` | laptop, ROS | Synchronised frame + command + task recorder |
