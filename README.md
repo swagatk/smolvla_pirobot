@@ -251,6 +251,32 @@ on that machine first:
 BATCH=16 STEPS=20000 bash train_smolvla.sh <hf_user>/pirobot_nav
 ```
 
+### Training on Google Colab
+
+`colab/train_smolvla_colab.ipynb` runs the same fine-tuning on a Colab GPU
+(written for an A100). It downloads the dataset from the Hugging Face Hub
+(default `swagatk/pirobot_teleop`) pinned to one commit, trains with batch 32
+for 20k steps (action expert only, vision encoder frozen) and checkpoints every
+2000 steps. Open it in Colab, choose `Runtime → Change runtime type → A100`,
+then `Run all`.
+
+- Checkpoints go to `MyDrive/smolvla_pirobot/<RUN_NAME>/checkpoints/` (newest
+  3 kept). Training writes to `/content` and a background thread copies each
+  finished checkpoint to Drive, because LeRobot's `checkpoints/last` is a
+  symlink and Drive cannot store symlinks.
+- If the session drops, `Run all` again with the same `RUN_NAME`: it restores
+  the newest Drive checkpoint and resumes.
+- When training ends (or crashes) the runtime disconnects itself to save
+  compute units. Stopping the cell by hand does not disconnect. If an earlier
+  cell fails (e.g. the install), the runtime stays up until Colab's idle timeout.
+- `run_info.json`, `train_*.log` and `pip_freeze_*.txt` next to the checkpoints
+  record the dataset commit, config, command, GPU and package versions.
+- A private dataset needs a Colab secret named `HF_TOKEN`.
+
+Tested: the checkpoint sync/resume helpers (against a fake checkpoint tree) and
+the `lerobot-train` flags (against lerobot 0.6.1). The notebook has not yet been
+run end to end on Colab.
+
 ## 7. Run on the robot
 
 ```bash
@@ -297,5 +323,6 @@ snapping. Changing the task mid-run resets the action queue.
 | `laptop/episode_ctl.py` | laptop, ROS | One-key start/save/discard/task control |
 | `laptop/convert_to_lerobot.py` | laptop, venv | Raw episodes → LeRobot v3 dataset |
 | `laptop/train_smolvla.sh` | laptop, venv | `lerobot-train` fine-tuning of `smolvla_base` |
+| `colab/train_smolvla_colab.ipynb` | Colab | Same fine-tuning on a Colab GPU, Drive checkpoints, auto-resume and auto-disconnect |
 | `laptop/smolvla_server.py` | laptop, venv | Loads the checkpoint, serves actions on localhost |
 | `laptop/smolvla_bridge.py` | laptop, ROS | Camera → server → snapped `/pirobot/command`, with enable/stop |
