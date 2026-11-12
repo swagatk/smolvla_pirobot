@@ -258,12 +258,19 @@ BATCH=16 STEPS=20000 bash train_smolvla.sh <hf_user>/pirobot_nav
 `colab/train_smolvla_colab.ipynb` runs the same fine-tuning on a Colab GPU
 (written for an A100). It downloads the dataset from the Hugging Face Hub
 (default `swagatk/pirobot_teleop`) pinned to one commit, trains with batch 32
-for 20k steps (action expert only, vision encoder frozen) and checkpoints every
-2000 steps. Open it in Colab, choose `Runtime → Change runtime type → A100`,
-then `Run all`.
+for 6k steps (action expert only, vision encoder frozen), computes held-out eval
+loss every 500 steps and checkpoints every 1000 steps. Open it in Colab, choose
+`Runtime → Change runtime type → A100` (an L4 works too), then `Run all`.
 
-- Checkpoints go to `MyDrive/smolvla_pirobot/<RUN_NAME>/checkpoints/` (newest
-  3 kept). Training writes to `/content` and a background thread copies each
+Why 6k steps: the first run (20k steps, batch 32, Colab L4, 2026-11-12, log
+`train_20261112_134204.log`) had its lowest held-out eval loss at step 2000
+(0.705), stayed near that up to ~6k, then rose to about 1.0 by 14k–20k while
+the training loss kept falling. With ~34 min of driving it overfits quickly;
+more data is the real fix. That run took 3 h 05 min on the L4 (0.53 s/step,
+GPU-bound).
+
+- Checkpoints go to `MyDrive/smolvla_pirobot/<RUN_NAME>/checkpoints/` (all
+  kept by default, ~1.3 GB each; `KEEP_ON_DRIVE=N` keeps the newest N). Training writes to `/content` and a background thread copies each
   finished checkpoint to Drive, because LeRobot's `checkpoints/last` is a
   symlink and Drive cannot store symlinks.
 - If the session drops, `Run all` again with the same `RUN_NAME`: it restores
@@ -275,9 +282,11 @@ then `Run all`.
   record the dataset commit, config, command, GPU and package versions.
 - A private dataset needs a Colab secret named `HF_TOKEN`.
 
-Tested: the checkpoint sync/resume helpers (against a fake checkpoint tree) and
-the `lerobot-train` flags (against lerobot 0.6.1). The notebook has not yet been
-run end to end on Colab.
+Tested: the notebook ran end to end on a Colab L4 (20k-step configuration);
+the checkpoint sync/prune/resume helpers are tested against a fake checkpoint
+tree, `use_amp=false` training and resume were checked locally with lerobot
+0.6.1, and the progress-line filter was checked against the first run's log.
+The 6k-step configuration itself has not been run yet.
 
 ## 7. Run on the robot
 
