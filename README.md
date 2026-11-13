@@ -253,6 +253,8 @@ on that machine first:
 BATCH=16 STEPS=20000 bash train_smolvla.sh <hf_user>/pirobot_nav
 ```
 
+
+
 ### Training on Google Colab
 
 `colab/train_smolvla_colab.ipynb` runs the same fine-tuning on a Colab GPU
@@ -337,3 +339,9 @@ snapping. Changing the task mid-run resets the action queue.
 | `colab/train_smolvla_colab.ipynb` | Colab | Same fine-tuning on a Colab GPU, Drive checkpoints, auto-resume and auto-disconnect |
 | `laptop/smolvla_server.py` | laptop, venv | Loads the checkpoint, serves actions on localhost |
 | `laptop/smolvla_bridge.py` | laptop, ROS | Camera → server → snapped `/pirobot/command`, with enable/stop |
+
+
+## Artefacts 
+
+* Dataset on HuggingFace at [swagatk/pirobot_teleop](https://huggingface.co/datasets/swagatk/pirobot_teleop)
+* Youtuhe Vidoe: [https://www.youtube.com/shorts/XVCoi2nYLDM](https://www.youtube.com/shorts/XVCoi2nYLDM)
