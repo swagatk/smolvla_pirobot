@@ -311,13 +311,93 @@ snapping. Changing the task mid-run resets the action queue.
 
 ## 8. Improving the model (second round)
 
-1. Run the policy, and when it makes a mistake, disable it, take over with the
-   teleop **while recording**, and save that correction as a new episode
-   (DAgger-style). These episodes are worth far more than more clean driving.
+1. Run the policy, and when it makes a mistake, take over **while recording**
+   and save that correction as a new episode (DAgger-style). These episodes
+   are worth far more than more clean driving. `takeover_teleop.py` does this
+   from one window (below).
 2. If the three tasks interfere, check the per-task episode counts printed by
    the converter and balance them.
 3. Paraphrase task strings with `--task-map` (or record a few episodes with
    alternative wordings) if you want it to respond to varied phrasing.
+
+### Recording corrections with `takeover_teleop.py`
+
+One pygame window replaces `keyboard_publisher` and `episode_ctl` during policy
+runs. Do **not** run `keyboard_publisher` at the same time: it publishes STOP
+continuously and would fight the policy (the window warns, by node name, about
+any other publisher on `/pirobot/command`).
+
+```bash
+# T1 (lerobot venv): policy server
+python smolvla_server.py --policy <run>/checkpoints/006000/pretrained_model --n-action-steps 5
+# T2: bridge
+python3 smolvla_bridge.py
+# T3: recorder. It must record /takeover/command (only the takeover window publishes
+#     there), NOT /pirobot/command or /cmd_vel, where the policy also publishes.
+#     A separate folder keeps round-2 episodes apart from round 1.
+python3 episode_recorder.py --ros-args -p out_dir:=$HOME/pirobot_data/raw_round2 -p cmd_timeout:=0.5 \
+    -p pirobot_cmd_topic:=/takeover/command -p cmd_topic:=/takeover/unused
+# T4: takeover window (sends this task to both the bridge and the recorder)
+python3 takeover_teleop.py --ros-args -p task:="move around while avoiding obstacles"
+```
+
+| Key | Policy driving | You driving | Idle |
+|---|---|---|---|
+| `SPACE` | take over (robot stops) | **save**, give control back to the policy | start the policy |
+| arrows | take over and steer at once | drive (nothing held = STOP) | – |
+| `S` | pause the policy | save and stay stopped | – |
+| `D` | – | discard this correction, stay stopped | – |
+| `ESC` | quit | save the correction, then quit | quit |
+
+Window colour shows who is driving: blue = policy, red = you (with `[REC]`
+when recording), grey = idle.
+
+How policy commands are kept out of corrections:
+- Your commands go to the robot on `/pirobot/command` *and* to the recorder on
+  `/takeover/command`, which nothing else publishes. A policy action that was
+  still being computed when you took over can reach the robot for a moment, but
+  it can never be recorded. The window refuses to record (`NOT RECORDING`,
+  with the reason) if the recorder is subscribed to `/pirobot/command` or
+  `/cmd_vel`. In a test, recording those topics put the policy's late commands
+  into the first frames of every correction.
+- On takeover the policy is disabled first; recording starts 0.3 s later.
+- If commands you did not send keep arriving on `/pirobot/command` after
+  takeover, the window shows a red warning and re-sends the disable.
+
+When the policy is re-enabled:
+- Only after the recorder has *answered* the save, and only if the bridge is
+  listening.
+- If a recorder call goes unanswered (or it replies "Already recording"), the
+  recorder might still be recording, so the policy is blocked. `SPACE` in IDLE
+  then sends a stop first; press `SPACE` again once it has answered. A fresh
+  `idle` status from the recorder also clears the block.
+- If the recorder is not running you can still drive; the window says
+  `NOT RECORDING` and handing back saves nothing.
+
+The task in the window is re-sent to the recorder at each takeover and to the
+bridge at each enable. If the recorder still starts with a different task (it
+reports the task in its reply), that correction is discarded at once. On exit
+(ESC, closing the window, Ctrl-C, or a crash) the tool disables the policy,
+sends STOP and asks the recorder to stop any open episode.
+
+Good corrections start just before the failure (take over as soon as you see
+it going wrong, e.g. heading into a corner), drive out of it the way you want
+the policy to, and end once it is clear (a few seconds). Each one is saved as
+its own episode. Prefer taking over with an **arrow** (it starts steering at
+once). `SPACE` stops the robot first, so the episode begins with STOP frames
+while you react: `convert_to_lerobot.py` keeps `--keep-idle` (default 5, i.e.
+0.5 s) of them at each end, and STOP labels at the failure moment teach the
+policy to stop there. Use `--keep-idle 1` when converting corrections.
+
+Tests (no robot needed; ROS 2 Jazzy sourced, pygame and pytest installed):
+```bash
+cd laptop && python3 -m pytest -q tests/
+```
+They run the real recorder and bridge classes in-process with a fake camera
+and a fake policy that keeps publishing for 0.4 s after it is disabled (or
+never stops). `tests/conftest.py` puts them on an isolated, localhost-only ROS
+domain (88, or `$PIROBOT_TEST_ROS_DOMAIN`, never 19), so they cannot reach the
+robot.
 
 ## Files
 
@@ -337,3 +417,6 @@ snapping. Changing the task mid-run resets the action queue.
 | `colab/train_smolvla_colab.ipynb` | Colab | Same fine-tuning on a Colab GPU, Drive checkpoints, auto-resume and auto-disconnect |
 | `laptop/smolvla_server.py` | laptop, venv | Loads the checkpoint, serves actions on localhost |
 | `laptop/smolvla_bridge.py` | laptop, ROS | Camera → server → snapped `/pirobot/command`, with enable/stop |
+| `laptop/takeover_teleop.py` | laptop, ROS | One-window policy takeover + correction recording (DAgger) |
+| `laptop/takeover_logic.py` | laptop | Takeover state machine (pure Python, unit-tested) |
+| `laptop/tests/` | laptop | Tests for the takeover tool (`python3 -m pytest -q tests/`) |
