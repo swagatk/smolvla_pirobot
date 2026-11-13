@@ -36,6 +36,7 @@ from takeover_teleop import TakeoverTeleop  # noqa: E402
 TASK = "move around while avoiding obstacles"
 pytestmark = pytest.mark.slow
 GOOD_WIRING = "    pirobot_cmd_topic: '/takeover/command'\n    cmd_topic: '/takeover/unused'\n"
+OLD_WIRING = ""                    # recorder defaults: /pirobot/command and /cmd_vel
 
 
 def test_isolated_from_robot_domain():
@@ -134,12 +135,12 @@ def ros_ctx(tmp_path):
     """Factory: init rclpy with a params file for the real recorder and bridge."""
     started = []
 
-    def init(wiring=GOOD_WIRING):
+    def init(wiring=GOOD_WIRING, cmd_timeout=0.5):
         out = tmp_path / "raw"
         params = tmp_path / "params.yaml"
         params.write_text(
             "episode_recorder:\n  ros__parameters:\n"
-            f"    out_dir: '{out}'\n    cmd_timeout: 0.5\n    task: 'some other task'\n{wiring}"
+            f"    out_dir: '{out}'\n    cmd_timeout: {cmd_timeout}\n    task: 'some other task'\n{wiring}"
             "smolvla_bridge:\n  ros__parameters:\n    server_port: 6999\n")
         rclpy.init(args=["--ros-args", "--params-file", str(params)])
         started.append(True)
@@ -161,7 +162,7 @@ def wait_ready(ex, tool, need_recorder=True):
         ok = tool.bridge_ready() and tool.task_sent["bridge"]
         if need_recorder:
             ok = ok and all(c.service_is_ready() for c in tool.cli.values()) and tool.task_sent["recorder"] \
-                and tool.rec_status.startswith("idle")
+                and tool.rec_status.startswith("idle") and tool.rec_cmd_timeout is not None
         return ok
     assert spin_until(ex, ready, 20), f"setup not ready: {tool.rec_status!r} {tool.task_sent}"
 
@@ -238,21 +239,23 @@ def test_policy_ignoring_disable_is_flagged_and_not_recorded(ros_ctx):
     ex = make(rec, cam, policy, tool)
     try:
         wait_ready(ex, tool)
-        keys.run([(5, "STOP", ["SPACE"]), (25, "UP", []), (1, "STOP", ["S"]), (5, "STOP", [])])
+        keys.run([(5, "STOP", ["SPACE"]), (25, "UP", []), (5, "STOP", [])])
         assert spin_until(ex, lambda: not keys.busy(), 20)
         assert spin_until(ex, lambda: tool.logic.state == IDLE, 5)
-        assert tool.policy_alarm
-        assert policy.enables.count(False) >= 2          # disable was re-sent
+        assert tool.policy_alarm and tool.logic.discarded == 1 and tool.logic.saved == 0
+        assert policy.enables.count(False) >= 3          # disable kept being re-sent
     finally:
         destroy(tool, policy, cam, rec)
-    eps = episodes(out)
-    assert len(eps) == 1
-    assert "right" not in [s["cmd"] for s in read_episode(eps[0])[1]]
+    assert episodes(out) == []                           # mislabelled correction not kept
 
 
-def test_recorder_on_policy_topics_is_refused(ros_ctx):
+@pytest.mark.parametrize("wiring,cmd_timeout,reason", [
+    (OLD_WIRING, 0.5, "/takeover/command"),
+    (GOOD_WIRING, 0.0, "cmd_timeout"),
+])
+def test_bad_recorder_config_is_refused(ros_ctx, wiring, cmd_timeout, reason):
     from episode_recorder import EpisodeRecorder
-    out = ros_ctx(wiring="")                     # recorder defaults: /pirobot/command and /cmd_vel
+    out = ros_ctx(wiring=wiring, cmd_timeout=cmd_timeout)
     keys = ScriptedKeys()
     rec, cam, policy = EpisodeRecorder(), FakeCamera(), FakePolicy()
     tool = TakeoverTeleop(keys)
@@ -261,7 +264,8 @@ def test_recorder_on_policy_topics_is_refused(ros_ctx):
         wait_ready(ex, tool)
         keys.run([(5, "STOP", ["SPACE"]), (15, "UP", [])])
         assert spin_until(ex, lambda: not keys.busy(), 20)
-        assert not tool.logic.recording and "NOT RECORDING" in tool.last_msg and "recorder" in tool.last_msg
+        assert not tool.logic.recording and "NOT RECORDING" in tool.last_msg and reason in tool.last_msg, \
+            tool.last_msg
         keys.run([(1, "STOP", ["SPACE"]), (3, "STOP", [])])          # hand back: nothing to save
         assert spin_until(ex, lambda: not keys.busy(), 5)
         assert tool.logic.state == POLICY and tool.logic.saved == 0
@@ -329,3 +333,53 @@ def test_real_bridge_accepts_enable_and_task(ros_ctx):
         assert spin_until(ex, lambda: not bridge.enabled, 5)
     finally:
         destroy(tool, bridge)
+
+
+def test_old_wiring_would_record_policy_commands(ros_ctx):
+    """Why the recorder must listen to /takeover/command: with the old wiring (recorder on
+    /pirobot/command and /cmd_vel) and the check disabled, the policy's late commands after
+    takeover end up in the correction."""
+    from episode_recorder import EpisodeRecorder
+    out = ros_ctx(wiring=OLD_WIRING)
+    keys = ScriptedKeys()
+    rec, cam, policy = EpisodeRecorder(), FakeCamera(), FakePolicy(late_s=0.4)
+    tool = TakeoverTeleop(keys)
+    tool.check_wiring = False
+    ex = make(rec, cam, policy, tool)
+    try:
+        wait_ready(ex, tool)
+        keys.run(TAKEOVER_SCRIPT)
+        assert spin_until(ex, lambda: not keys.busy(), 20)
+        assert spin_until(ex, lambda: tool.logic.state == POLICY, 5), tool.last_msg
+    finally:
+        destroy(tool, policy, cam, rec)
+    eps = episodes(out)
+    assert len(eps) == 1
+    assert "right" in [s["cmd"] for s in read_episode(eps[0])[1]]
+
+
+def test_exit_while_driving_ends_with_stop(ros_ctx):
+    """Exit with an arrow held and a recording open: STOP must be the last command sent."""
+    from episode_recorder import EpisodeRecorder
+    ros_ctx()
+    keys = ScriptedKeys()
+    rec, cam, policy = EpisodeRecorder(), FakeCamera(), FakePolicy(late_s=0.0)
+    tool = TakeoverTeleop(keys)
+    seen = []
+    probe = rclpy.create_node("probe")
+    probe.create_subscription(String, "/pirobot/command", lambda m: seen.append(m.data), 50)
+    ex = make(rec, cam, policy, tool, probe)
+    try:
+        wait_ready(ex, tool)
+        keys.run([(5, "STOP", ["SPACE"]), (40, "UP", [])])
+        assert spin_until(ex, lambda: tool.logic.recording, 20)
+        tool.shutdown_safely(stop_timeout=2.0)          # arrow still "held" by the script
+        n = len(seen)
+        spin_until(ex, lambda: False, 1.0)
+        after = seen[n:]
+    finally:
+        destroy(probe, tool, policy, cam, rec)
+    assert tool.shutting_down and "STOP" in after
+    first_stop = after.index("STOP")                    # an UP already in flight may precede it
+    assert "UP" not in after[first_stop:], after
+    assert seen[-1] == "STOP", seen[-10:]

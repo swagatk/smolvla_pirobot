@@ -54,6 +54,7 @@ class TakeoverLogic:
         self.start_requested = False
         self.start_ticks = 0
         self.quitting = False
+        self.quit_discard = False      # interference seen while a start was pending
         self.saved = 0                 # corrections saved this session
         self.discarded = 0
 
@@ -106,6 +107,20 @@ class TakeoverLogic:
             return [("cmd", held)]
         return []
 
+    def on_policy_interference(self):
+        """Commands we did not send keep reaching the robot while the human drives.
+        The recording's labels would not match what the robot did, so it is discarded."""
+        if self.state not in (STARTING, HUMAN):
+            return []
+        out = [("enable", False), ("msg", "another node kept driving the robot: correction discarded")]
+        if self.recording or self.recorder_unsure:
+            return out + self._finish("discard", then=IDLE)
+        if self.start_requested:
+            self.quit_discard = True          # discard once the pending start is answered
+            return out
+        self.state = IDLE
+        return out + [("cmd", "STOP")]
+
     def on_recorder_idle(self):
         """The node saw a fresh 'idle' status from the recorder (and no call is pending)."""
         if self.state in (IDLE, POLICY, HUMAN) and not self.recording:
@@ -122,6 +137,9 @@ class TakeoverLogic:
             self.state = HUMAN
             if answered and success:
                 self.recording = True
+                if self.quit_discard:
+                    self.quit_discard = False
+                    return [("msg", "discarding (interference during start)")] + self._finish("discard", then=IDLE)
                 if not task_ok:
                     out = [("msg", f"recorder used a different task ({message}); discarding")]
                     return out + self._finish("discard", then=IDLE)
@@ -131,6 +149,9 @@ class TakeoverLogic:
             self.recording = False
             if not answered or "already recording" in message.lower():
                 self.recorder_unsure = True
+            if self.quit_discard:
+                self.quit_discard = False
+                return self._finish("discard", then=IDLE)
             if self.quitting:
                 return self._finish("stop", then=IDLE)   # sends stop if unsure, else quits
             reason = message or "recorder not answering"
@@ -188,6 +209,7 @@ class TakeoverLogic:
         self.recording = False
         self.start_requested = False
         self.start_ticks = 0
+        self.quit_discard = False
         return [("enable", False), ("cmd", first_cmd), ("msg", "TAKEOVER: you are driving")]
 
     def _finish(self, op, then, bridge_ready=True):

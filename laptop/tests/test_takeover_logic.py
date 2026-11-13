@@ -311,3 +311,32 @@ def test_stale_results_are_ignored():
     assert lg.on_rec_result("stop", True, True) == []
     to_policy(lg)
     assert lg.on_rec_result("stop", True, True) == [] and lg.state == POLICY
+
+
+def test_interference_while_recording_discards():
+    lg = TakeoverLogic()
+    to_policy(lg)
+    to_recording(lg)
+    eff = lg.on_policy_interference()
+    assert ("enable", False) in eff and ("rec", "discard") in eff and lg.state == DISCARDING
+    eff = lg.on_rec_result("discard", True, True, "Discarded")
+    assert lg.state == IDLE and not kinds(eff, "enable") and lg.saved == 0 and lg.discarded == 1
+
+
+def test_interference_while_start_pending_discards_after_start():
+    lg = TakeoverLogic()
+    to_policy(lg)
+    node_tick(lg, held="UP")
+    run_until_start(lg)
+    assert not kinds(lg.on_policy_interference(), "rec")
+    eff = lg.on_rec_result("start", True, True, "Recording")
+    assert ("rec", "discard") in eff and lg.state == DISCARDING
+
+
+def test_interference_before_start_goes_idle_and_is_ignored_elsewhere():
+    lg = TakeoverLogic()
+    to_policy(lg)
+    node_tick(lg, ["SPACE"])
+    eff = lg.on_policy_interference()
+    assert lg.state == IDLE and ("cmd", "STOP") in eff and not kinds(eff, "rec")
+    assert lg.on_policy_interference() == []          # not driving: nothing to do

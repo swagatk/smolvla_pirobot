@@ -357,12 +357,16 @@ How policy commands are kept out of corrections:
   `/takeover/command`, which nothing else publishes. A policy action that was
   still being computed when you took over can reach the robot for a moment, but
   it can never be recorded. The window refuses to record (`NOT RECORDING`,
-  with the reason) if the recorder is subscribed to `/pirobot/command` or
-  `/cmd_vel`. In a test, recording those topics put the policy's late commands
-  into the first frames of every correction.
-- On takeover the policy is disabled first; recording starts 0.3 s later.
-- If commands you did not send keep arriving on `/pirobot/command` after
-  takeover, the window shows a red warning and re-sends the disable.
+  with the reason) unless the recorder is subscribed to `/takeover/command`,
+  not to `/pirobot/command` or `/cmd_vel`, and has `cmd_timeout > 0` (so idle
+  time is labelled STOP). `test_old_wiring_would_record_policy_commands` shows
+  what goes wrong otherwise: the policy's late commands land in the first
+  frames of the correction.
+- On takeover the policy is disabled first; recording starts 0.2–0.3 s later.
+- If commands you did not send keep arriving on `/pirobot/command` while the
+  policy should be off, the window shows a red warning, re-sends the disable
+  every tick while they continue, and **discards** the correction in progress
+  (its labels would not match what the robot did).
 
 When the policy is re-enabled:
 - Only after the recorder has *answered* the save, and only if the bridge is
@@ -378,7 +382,14 @@ The task in the window is re-sent to the recorder at each takeover and to the
 bridge at each enable. If the recorder still starts with a different task (it
 reports the task in its reply), that correction is discarded at once. On exit
 (ESC, closing the window, Ctrl-C, or a crash) the tool disables the policy,
-sends STOP and asks the recorder to stop any open episode.
+sends STOP and asks the recorder to stop any open episode; STOP is the last
+command it sends.
+
+Known limitation: after an unanswered recorder call, a fresh `idle` status
+clears the block. If the delayed call reaches the recorder *after* that status
+(a DDS delay of more than ~1.5 s), the recorder can start an episode the tool
+does not know about. Thanks to `/takeover/command` it would contain only STOP
+labels, never policy commands; delete it if you find one.
 
 Good corrections start just before the failure (take over as soon as you see
 it going wrong, e.g. heading into a corner), drive out of it the way you want

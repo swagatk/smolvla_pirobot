@@ -27,9 +27,11 @@ Do not run keyboard_publisher at the same time: it publishes STOP continuously
 and would fight the policy. The window warns about any other publisher.
 """
 import time
+from collections import deque
 
 import rclpy
-from rcl_interfaces.msg import ParameterDescriptor
+from rcl_interfaces.msg import ParameterDescriptor, ParameterType
+from rcl_interfaces.srv import GetParameters
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
@@ -112,7 +114,7 @@ class TakeoverTeleop(Node):
         g = lambda n: self.get_parameter(n).value
         self.keys = keys
         self.logic = TakeoverLogic(start_delay_ticks=int(g("start_delay_ticks")))
-        self.task = str(g("task"))
+        self.task = str(g("task")).strip()        # the recorder strips it too
         self.cmd_topic = g("cmd_topic")
         self.record_topic = g("record_topic")
         self.service_timeout = float(g("service_timeout"))
@@ -128,6 +130,9 @@ class TakeoverTeleop(Node):
         self.cli = {op: self.create_client(Trigger, f"{ns}/{op}") for op in ("start", "stop", "discard")}
         self.create_subscription(String, f"{ns}/status", self.on_status, 10)
         self.create_subscription(String, self.cmd_topic, self.on_robot_cmd, 10)
+        self.param_cli = self.create_client(GetParameters, f"{ns}/get_parameters")
+        self.rec_cmd_timeout = None          # recorder's cmd_timeout, once read
+        self.param_future = None
 
         self.rec_status, self.rec_status_t = "recorder: not seen yet", None
         self.last_answer_t = -1e9
@@ -136,6 +141,8 @@ class TakeoverTeleop(Node):
         self.last_msg = ""
         self.held = "STOP"
         self.last_sent = None                # last human command we published
+        self.sent_recent = deque()           # (time, cmd) of our recent publications (loopback check)
+        self.shutting_down = False
         self.takeover_t = None               # when we last took over (for foreign-command detection)
         self.foreign = []                    # times of /pirobot/command messages we did not send
         self.policy_alarm = False
@@ -173,23 +180,44 @@ class TakeoverTeleop(Node):
         for t in (self.cmd_topic, "/cmd_vel"):
             if RECORDER_NODE in self.node_names(t):
                 return f"recorder also listens to {t}, where the policy publishes (set its topic to /takeover/unused)"
+        if self.rec_cmd_timeout is None:
+            return "recorder cmd_timeout not read yet (is episode_recorder running?)"
+        if self.rec_cmd_timeout <= 0:
+            return "recorder cmd_timeout must be > 0 (run it with -p cmd_timeout:=0.5)"
         return None
+
+    def poll_recorder_params(self):
+        """Read the recorder's cmd_timeout (needed so idle time is labelled STOP)."""
+        if not self.param_cli.service_is_ready():
+            self.rec_cmd_timeout, self.param_future = None, None   # recorder gone or restarted
+            return
+        if self.param_future is None and self.rec_cmd_timeout is None:
+            self.param_future = self.param_cli.call_async(GetParameters.Request(names=["cmd_timeout"]))
+        elif self.param_future is not None and self.param_future.done():
+            r, self.param_future = self.param_future.result(), None
+            if r is not None and r.values:
+                v = r.values[0]
+                is_double = v.type == ParameterType.PARAMETER_DOUBLE
+                self.rec_cmd_timeout = float(v.double_value if is_double else v.integer_value)
 
     def other_publishers(self):
         return self.node_names(self.cmd_topic, pubs=True) - {self.get_name(), BRIDGE_NODE}
 
     def on_robot_cmd(self, msg):
-        """Count commands on /pirobot/command that we did not send, while the human drives."""
-        if self.logic.state not in (STARTING, HUMAN) or self.takeover_t is None:
+        """Count commands on /pirobot/command that we did not send, whenever the policy should be off."""
+        if self.logic.state == POLICY or self.takeover_t is None:
             return
         now = time.monotonic()
-        if now - self.takeover_t < 0.5 or msg.data == self.last_sent:
+        if now - self.takeover_t < 0.5:
             return                                   # grace for the bridge's own disable-STOP
+        while self.sent_recent and now - self.sent_recent[0][0] > 0.3:
+            self.sent_recent.popleft()
+        if msg.data == self.last_sent or any(c == msg.data for _, c in self.sent_recent):
+            return                                   # our own message, possibly delivered late
         self.foreign = [t for t in self.foreign if now - t < 1.0] + [now]
         if len(self.foreign) >= 3 and not self.policy_alarm:
             self.policy_alarm = True
-            self.enable_pub.publish(Bool(data=False))
-            self.apply([("msg", "WARNING: another node is still driving /pirobot/command; re-sent disable")])
+            self.apply(self.logic.on_policy_interference())
 
     # ---- task -----------------------------------------------------------
     def send_task(self, to_bridge=True, to_recorder=True):
@@ -248,16 +276,18 @@ class TakeoverTeleop(Node):
             if kind == "enable":
                 if eff[1]:
                     self.send_task(to_recorder=False)      # bridge runs the task shown in the window
+                    self.policy_alarm = False
                 else:
                     self.send_task(to_bridge=False)        # recorder gets the task well before any start
-                    self.takeover_t, self.foreign, self.policy_alarm = time.monotonic(), [], False
+                    if self.takeover_t is None or (self.logic.state == STARTING and not self.policy_alarm):
+                        self.takeover_t, self.foreign = time.monotonic(), []   # a fresh takeover
                 self.enable_pub.publish(Bool(data=bool(eff[1])))
                 self.get_logger().info("policy ENABLED" if eff[1] else "policy disabled")
             elif kind == "cmd":
                 self.last_sent = eff[1]
+                self.sent_recent.append((time.monotonic(), eff[1]))
                 self.cmd_pub.publish(String(data=eff[1]))
-                if self.logic.state in (STARTING, HUMAN):
-                    self.rec_pub.publish(String(data=eff[1]))
+                self.rec_pub.publish(String(data=eff[1]))   # incl. the final STOP before a save
             elif kind == "rec":
                 self.call_recorder(eff[1])
             elif kind == "msg":
@@ -268,6 +298,11 @@ class TakeoverTeleop(Node):
 
     # ---- main loop ------------------------------------------------------
     def tick(self):
+        if self.shutting_down:
+            return
+        self.poll_recorder_params()
+        if self.policy_alarm and self.foreign and time.monotonic() - self.foreign[-1] < 1.0:
+            self.enable_pub.publish(Bool(data=False))      # keep insisting while it still drives
         if not all(self.task_sent.values()):
             self.send_task(to_bridge=not self.task_sent["bridge"], to_recorder=not self.task_sent["recorder"])
         self.check_pending()
@@ -306,10 +341,8 @@ class TakeoverTeleop(Node):
     # ---- shutdown -------------------------------------------------------
     def shutdown_safely(self, stop_timeout=3.0):
         """Disable the policy, stop the robot, and close any recording that may be open (best effort)."""
-        for _ in range(3):
-            self.enable_pub.publish(Bool(data=False))
-            self.cmd_pub.publish(String(data="STOP"))
-            time.sleep(0.05)
+        self.shutting_down = True            # tick() no longer publishes held arrows
+        self.stop_robot()
         maybe_open = (self.logic.recording or self.logic.recorder_unsure or self.pending is not None
                       or self.rec_status.startswith("REC"))
         c = self.cli["stop"]
@@ -318,6 +351,14 @@ class TakeoverTeleop(Node):
             rclpy.spin_until_future_complete(self, fut, timeout_sec=stop_timeout)
             r = fut.result() if fut.done() else None
             self.get_logger().info(f"recorder stop on exit: {r.message if r else 'no answer'}")
+        self.stop_robot()                    # STOP is the last thing the robot hears from us
+
+    def stop_robot(self):
+        for _ in range(3):
+            self.enable_pub.publish(Bool(data=False))
+            self.cmd_pub.publish(String(data="STOP"))
+            self.rec_pub.publish(String(data="STOP"))
+            time.sleep(0.05)
 
 
 def run(node, max_quit_wait_s=10.0):
